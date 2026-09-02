@@ -300,6 +300,7 @@ static void renderMenu(const DisplayInfo *display, const AppState *app)
 
 static void renderScreenTest(const DisplayInfo *display, const AppState *app)
 {
+
     OSScreenClearBufferEx(display->id, kTestColours[app->colourIndex]);
     if (app->colourIndex == 0 && app->screenIntroFrames > 0) {
         uint32_t middleRow = (uint32_t)(display->height / 48);
@@ -476,15 +477,33 @@ static void renderKeyTest(const DisplayInfo *display, const VPADStatus *status,
 static void drawGamePadPhoto(const DisplayInfo *display)
 {
     OSScreenClearBufferEx(display->id, COLOUR_BG);
-    for (int y = 0; y < 480; ++y) {
-        for (int x = 0; x < 854; ++x) {
-            size_t offset = ((size_t)y * 854u + (size_t)x) * 3u;
+    for (int y = 0; y < display->height; ++y) {
+        int sourceY = y * 480 / display->height;
+        for (int x = 0; x < display->width; ++x) {
+            int sourceX = x * 854 / display->width;
+            size_t offset = ((size_t)sourceY * 854u + (size_t)sourceX) * 3u;
             uint32_t colour = RGB(gamepad_ui_bin[offset],
                                   gamepad_ui_bin[offset + 1],
                                   gamepad_ui_bin[offset + 2]);
             OSScreenPutPixelEx(display->id, (uint32_t)x, (uint32_t)y, colour);
         }
     }
+}
+
+static int photoX(const DisplayInfo *display, int x)
+{
+    return x * display->width / 854;
+}
+
+static int photoY(const DisplayInfo *display, int y)
+{
+    return y * display->height / 480;
+}
+
+static int photoRadius(const DisplayInfo *display, int radius)
+{
+    int scaled = radius * display->height / 480;
+    return scaled > 0 ? scaled : 1;
 }
 
 static void highlightCircle(const DisplayInfo *display, int x, int y, int radius)
@@ -494,9 +513,11 @@ static void highlightCircle(const DisplayInfo *display, int x, int y, int radius
     outlineCircle(display, x, y, radius + 4, COLOUR_WHITE);
 }
 
-static uint32_t photoPixelColour(int x, int y)
+static uint32_t photoPixelColour(const DisplayInfo *display, int x, int y)
 {
-    size_t offset = ((size_t)y * 854u + (size_t)x) * 3u;
+    int sourceX = x * 854 / display->width;
+    int sourceY = y * 480 / display->height;
+    size_t offset = ((size_t)sourceY * 854u + (size_t)sourceX) * 3u;
     return RGB(gamepad_ui_bin[offset], gamepad_ui_bin[offset + 1],
                gamepad_ui_bin[offset + 2]);
 }
@@ -515,13 +536,16 @@ static uint32_t redBlend(uint32_t source)
 
 static void photoPressedCircle(const DisplayInfo *display, int cx, int cy, int radius)
 {
+    cx = photoX(display, cx);
+    cy = photoY(display, cy);
+    radius = photoRadius(display, radius);
     for (int y = -radius; y <= radius; ++y) {
         int span = (int)sqrtf((float)(radius * radius - y * y));
         for (int x = -span; x <= span; ++x) {
             int px = cx + x;
             int py = cy + y;
             if (inside(display, px, py))
-                pixel(display, px, py, redBlend(photoPixelColour(px, py)));
+                pixel(display, px, py, redBlend(photoPixelColour(display, px, py)));
         }
     }
     outlineCircle(display, cx, cy, radius, COLOUR_PRESSED);
@@ -530,14 +554,29 @@ static void photoPressedCircle(const DisplayInfo *display, int cx, int cy, int r
 
 static void photoPressedRect(const DisplayInfo *display, int x, int y, int width, int height)
 {
+    int x1 = photoX(display, x + width);
+    int y1 = photoY(display, y + height);
+    x = photoX(display, x);
+    y = photoY(display, y);
+    width = x1 - x;
+    height = y1 - y;
     for (int py = y; py < y + height; ++py) {
         for (int px = x; px < x + width; ++px) {
             if (inside(display, px, py))
-                pixel(display, px, py, redBlend(photoPixelColour(px, py)));
+                pixel(display, px, py, redBlend(photoPixelColour(display, px, py)));
         }
     }
     outlineRect(display, x, y, width, height, COLOUR_PRESSED);
     outlineRect(display, x + 2, y + 2, width - 4, height - 4, COLOUR_PRESSED);
+}
+
+static void photoOutlineRect(const DisplayInfo *display, int x, int y,
+                             int width, int height, uint32_t colour)
+{
+    int x0 = photoX(display, x);
+    int y0 = photoY(display, y);
+    outlineRect(display, x0, y0, photoX(display, x + width) - x0,
+                photoY(display, y + height) - y0, colour);
 }
 
 static void photoButtonCircle(const DisplayInfo *display, uint32_t hold, uint32_t mask,
@@ -577,45 +616,59 @@ static void renderPhotoKeyTest(const DisplayInfo *display, const VPADStatus *sta
     int leftY = 147 - (int)(status->leftStick.y * 22.0f);
     int rightX = 703 + (int)(status->rightStick.x * 22.0f);
     int rightY = 147 - (int)(status->rightStick.y * 22.0f);
-    fillCircle(display, leftX, leftY, 5, COLOUR_ACCENT);
-    fillCircle(display, rightX, rightY, 5, COLOUR_ACCENT);
+    fillCircle(display, photoX(display, leftX), photoY(display, leftY),
+               photoRadius(display, 5), COLOUR_ACCENT);
+    fillCircle(display, photoX(display, rightX), photoY(display, rightY),
+               photoRadius(display, 5), COLOUR_ACCENT);
 
-    outlineRect(display, 20, 18, 52, 27, COLOUR_LINE);
-    outlineRect(display, 82, 18, 52, 27, COLOUR_LINE);
-    outlineRect(display, 720, 18, 52, 27, COLOUR_LINE);
-    outlineRect(display, 782, 18, 52, 27, COLOUR_LINE);
+    photoOutlineRect(display, 20, 18, 52, 27, COLOUR_LINE);
+    photoOutlineRect(display, 82, 18, 52, 27, COLOUR_LINE);
+    photoOutlineRect(display, 720, 18, 52, 27, COLOUR_LINE);
+    photoOutlineRect(display, 782, 18, 52, 27, COLOUR_LINE);
     if (hold & VPAD_BUTTON_ZL) photoPressedRect(display, 20, 18, 52, 27);
     if (hold & VPAD_BUTTON_L) photoPressedRect(display, 82, 18, 52, 27);
     if (hold & VPAD_BUTTON_R) photoPressedRect(display, 720, 18, 52, 27);
     if (hold & VPAD_BUTTON_ZR) photoPressedRect(display, 782, 18, 52, 27);
-    drawSmallTextCentred(display, 46, 28, "ZL", 1, COLOUR_WHITE);
-    drawSmallTextCentred(display, 108, 28, "L", 1, COLOUR_WHITE);
-    drawSmallTextCentred(display, 746, 28, "R", 1, COLOUR_WHITE);
-    drawSmallTextCentred(display, 808, 28, "ZR", 1, COLOUR_WHITE);
+    int smallScale = display->id == SCREEN_DRC ? 1 : 2;
+    int titleScale = display->id == SCREEN_DRC ? 2 : 3;
+    drawSmallTextCentred(display, photoX(display, 46), photoY(display, 28),
+                         "ZL", smallScale, COLOUR_WHITE);
+    drawSmallTextCentred(display, photoX(display, 108), photoY(display, 28),
+                         "L", smallScale, COLOUR_WHITE);
+    drawSmallTextCentred(display, photoX(display, 746), photoY(display, 28),
+                         "R", smallScale, COLOUR_WHITE);
+    drawSmallTextCentred(display, photoX(display, 808), photoY(display, 28),
+                         "ZR", smallScale, COLOUR_WHITE);
 
-    drawSmallTextCentred(display, 427, 158, "KEY / SENSOR TEST", 2, COLOUR_WHITE);
-    drawSmallFormatted(display, 260, 199, 1, COLOUR_WHITE,
+    drawSmallTextCentred(display, photoX(display, 427), photoY(display, 158),
+                         "KEY / SENSOR TEST", titleScale, COLOUR_WHITE);
+    drawSmallFormatted(display, photoX(display, 260), photoY(display, 199),
+                       smallScale, COLOUR_WHITE,
                        "LS %+1.2f,%+1.2f   RS %+1.2f,%+1.2f",
                        status->leftStick.x, status->leftStick.y,
                        status->rightStick.x, status->rightStick.y);
-    drawSmallFormatted(display, 260, 218, 1, COLOUR_WHITE,
+    drawSmallFormatted(display, photoX(display, 260), photoY(display, 218),
+                       smallScale, COLOUR_WHITE,
                        "GYRO  X%+1.2f  Y%+1.2f  Z%+1.2f",
                        status->gyro.x, status->gyro.y, status->gyro.z);
-    drawSmallFormatted(display, 260, 237, 1, COLOUR_WHITE,
+    drawSmallFormatted(display, photoX(display, 260), photoY(display, 237),
+                       smallScale, COLOUR_WHITE,
                        "ACCEL X%+1.2f  Y%+1.2f  Z%+1.2f",
                        status->accelorometer.acc.x, status->accelorometer.acc.y,
                        status->accelorometer.acc.z);
-    drawSmallFormatted(display, 260, 256, 1, COLOUR_WHITE,
+    drawSmallFormatted(display, photoX(display, 260), photoY(display, 256),
+                       smallScale, COLOUR_WHITE,
                        "TOUCH %-3s X%3u Y%3u   BAT %u VOL %u",
                        touch->touched ? "ON" : "OFF", touch->x, touch->y,
                        status->battery, status->slideVolume);
-    drawSmallTextCentred(display, 427, 463, "HOLD + AND - TO RETURN",
-                         1, COLOUR_LINE);
+    drawSmallTextCentred(display, photoX(display, 427), photoY(display, 463),
+                         "HOLD + AND - TO RETURN", smallScale, COLOUR_LINE);
 
     if (touch->touched && touch->validity == VPAD_VALID) {
         int x = 246 + (int)((uint32_t)touch->x * 360u / 853u);
         int y = 141 + (int)((uint32_t)touch->y * 202u / 479u);
-        highlightCircle(display, x, y, 6);
+        highlightCircle(display, photoX(display, x), photoY(display, y),
+                        photoRadius(display, 6));
     }
 }
 
@@ -625,8 +678,7 @@ static void render(const DisplayInfo *display, const AppState *app,
 {
     if (app->page == PAGE_SCREEN_TEST) renderScreenTest(display, app);
     else if (app->page == PAGE_KEY_TEST) {
-        if (display->id == SCREEN_DRC) renderPhotoKeyTest(display, status, touch, readError);
-        else renderKeyTest(display, status, touch, readError);
+        renderPhotoKeyTest(display, status, touch, readError);
     }
     else renderMenu(display, app);
 }
