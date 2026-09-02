@@ -34,6 +34,11 @@ typedef struct DisplayInfo {
     OSScreenID id;
     int width;
     int height;
+    int pitch;
+    uint8_t *memory;
+    size_t frameSize;
+    uint32_t *photoBackground;
+    int workBuffer;
 } DisplayInfo;
 
 typedef struct AppState {
@@ -474,20 +479,62 @@ static void renderKeyTest(const DisplayInfo *display, const VPADStatus *status,
     putPixelLabel(display, syncX + systemW / 2, systemY + systemH / 2, "S");
 }
 
-static void drawGamePadPhoto(const DisplayInfo *display)
+static bool initDisplay(DisplayInfo *display, OSScreenID id, int width, int height,
+                        void *memory, uint32_t bufferSize)
 {
-    OSScreenClearBufferEx(display->id, COLOUR_BG);
-    for (int y = 0; y < display->height; ++y) {
-        int sourceY = y * 480 / display->height;
-        for (int x = 0; x < display->width; ++x) {
-            int sourceX = x * 854 / display->width;
+    memset(display, 0, sizeof(*display));
+    display->id = id;
+    display->width = width;
+    display->height = height;
+    display->memory = memory;
+    display->frameSize = bufferSize / 2u;
+    display->pitch = (int)(display->frameSize / (size_t)height);
+    if (display->pitch < width * 4) return false;
+
+    display->photoBackground = memalign(0x40, display->frameSize);
+    if (!display->photoBackground) return false;
+    memset(display->photoBackground, 0, display->frameSize);
+    for (int y = 0; y < height; ++y) {
+        int sourceY = y * 480 / height;
+        uint32_t *row = (uint32_t *)((uint8_t *)display->photoBackground +
+                                     (size_t)y * (size_t)display->pitch);
+        for (int x = 0; x < width; ++x) {
+            int sourceX = x * 854 / width;
             size_t offset = ((size_t)sourceY * 854u + (size_t)sourceX) * 3u;
-            uint32_t colour = RGB(gamepad_ui_bin[offset],
-                                  gamepad_ui_bin[offset + 1],
-                                  gamepad_ui_bin[offset + 2]);
-            OSScreenPutPixelEx(display->id, (uint32_t)x, (uint32_t)y, colour);
+            row[x] = RGB(gamepad_ui_bin[offset], gamepad_ui_bin[offset + 1],
+                         gamepad_ui_bin[offset + 2]);
         }
     }
+
+    uint32_t *primary = (uint32_t *)display->memory;
+    uint32_t *secondary = (uint32_t *)(display->memory + display->frameSize);
+    const uint32_t marker = 0x13579BFFu;
+    *primary = 0;
+    *secondary = 0;
+    OSScreenClearBufferEx(id, marker);
+    if (*primary == marker) display->workBuffer = 0;
+    else if (*secondary == marker) display->workBuffer = 1;
+    else return false;
+    return true;
+}
+
+static void releaseDisplay(DisplayInfo *display)
+{
+    free(display->photoBackground);
+    display->photoBackground = NULL;
+}
+
+static void flipDisplay(DisplayInfo *display)
+{
+    OSScreenFlipBuffersEx(display->id);
+    display->workBuffer ^= 1;
+}
+
+static void drawGamePadPhoto(const DisplayInfo *display)
+{
+    uint8_t *work = display->memory +
+                    (size_t)display->workBuffer * display->frameSize;
+    memcpy(work, display->photoBackground, display->frameSize);
 }
 
 static int photoX(const DisplayInfo *display, int x)
@@ -737,8 +784,18 @@ int main(int argc, char **argv)
     OSScreenEnableEx(SCREEN_TV, TRUE);
     OSScreenEnableEx(SCREEN_DRC, TRUE);
 
-    const DisplayInfo tv = {SCREEN_TV, 1280, 720};
-    const DisplayInfo drc = {SCREEN_DRC, 854, 480};
+    DisplayInfo tv = {0};
+    DisplayInfo drc = {0};
+    if (!initDisplay(&tv, SCREEN_TV, 1280, 720, tvBuffer, tvSize) ||
+        !initDisplay(&drc, SCREEN_DRC, 854, 480, drcBuffer, drcSize)) {
+        releaseDisplay(&tv);
+        releaseDisplay(&drc);
+        free(tvBuffer);
+        free(drcBuffer);
+        OSScreenShutdown();
+        WHBProcShutdown();
+        return 1;
+    }
     AppState app = {PAGE_MENU, 0, 0, 0, false};
     VPADStatus status;
     VPADTouchData touch;
@@ -767,12 +824,14 @@ int main(int argc, char **argv)
 
         render(&tv, &app, &status, &touch, currentError);
         render(&drc, &app, &status, &touch, currentError);
-        OSScreenFlipBuffersEx(SCREEN_TV);
-        OSScreenFlipBuffersEx(SCREEN_DRC);
+        flipDisplay(&tv);
+        flipDisplay(&drc);
         if (app.page == PAGE_SCREEN_TEST && app.screenIntroFrames > 0)
             --app.screenIntroFrames;
     }
 
+    releaseDisplay(&tv);
+    releaseDisplay(&drc);
     free(tvBuffer);
     free(drcBuffer);
     WHBProcShutdown();
